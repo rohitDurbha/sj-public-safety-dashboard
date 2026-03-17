@@ -1334,7 +1334,7 @@ with tab_ai:
     gemini_key = st.text_input(
         "Gemini API Key",
         type="password",
-        placeholder="AIzaSyA6qngNPg_4xtkS5yWyK0-kLcPLyYAvVZI",
+        placeholder="paste api key here",
         help="Get a free key at https://aistudio.google.com/apikey",
         key="gemini_api_key",
     )
