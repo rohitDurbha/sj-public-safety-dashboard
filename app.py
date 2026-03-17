@@ -7,6 +7,7 @@ import numpy as np
 from datetime import datetime
 import requests
 from io import StringIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -271,12 +272,10 @@ st.markdown("""
 
 # ============================================================
 # DATA LOADING — Live from San José Open Data Portal
+# Uses parallel downloads + trimmed to key years for speed
 # ============================================================
 
 FIRE_URLS = {
-    2015: "https://data.sanjoseca.gov/dataset/8160209b-6da1-44d2-802b-c156a4b6feaf/resource/e465b97c-c209-412a-ba4d-cde03d655f44/download/fire_incident_2015.csv",
-    2016: "https://data.sanjoseca.gov/dataset/8160209b-6da1-44d2-802b-c156a4b6feaf/resource/69205f25-ba23-499c-9f1d-0a60bc2085a6/download/fire_incident_2016.csv",
-    2017: "https://data.sanjoseca.gov/dataset/8160209b-6da1-44d2-802b-c156a4b6feaf/resource/0b188850-9c57-473c-ac3f-b302d02d3536/download/fire_incident_2017.csv",
     2018: "https://data.sanjoseca.gov/dataset/8160209b-6da1-44d2-802b-c156a4b6feaf/resource/af9983fb-c595-4cdf-a849-e597fa8c39a0/download/fire_incident_2018.csv",
     2019: "https://data.sanjoseca.gov/dataset/8160209b-6da1-44d2-802b-c156a4b6feaf/resource/2201d98a-65cf-428d-8be0-98e7041291e2/download/fire_incident_2019.csv",
     2020: "https://data.sanjoseca.gov/dataset/8160209b-6da1-44d2-802b-c156a4b6feaf/resource/c23db08c-6df9-41be-a08c-1d00f9b01dcf/download/san-jose-fire-incidents-data-2020.csv",
@@ -288,59 +287,84 @@ FIRE_URLS = {
 POLICE_QUARTERLY_BASE = "https://data.sanjoseca.gov/dataset/c414a023-8e2c-4ed0-a0e0-2731913161a1/resource/{rid}/download/{fname}"
 POLICE_QUARTERLY = {
     "2021_Q1": ("0c2871c4-18fd-4b34-88e9-8d0a2164d479", "policecalls2021-q1.csv"),
-    "2021_Q2": ("9c541f6e-f47b-40e8-ad59-cebe1826698c", "policecalls2021-q2.csv"),
-    "2021_Q3": ("3be750e8-e66e-461c-a66e-bc4113c42c2c", "policecalls2021-q3.csv"),
-    "2021_Q4": ("989583eb-44a5-4129-854b-79d24e350b60", "policecalls2021-q4.csv"),
     "2022_Q1": ("3e67e7dc-d949-494b-ae57-c4eca13fe625", "policecalls2022-q1.csv"),
-    "2022_Q2": ("9978201b-28e2-4ebc-8bc7-a53997b25100", "policecalls2022-q2.csv"),
-    "2022_Q3": ("fe1f7ef8-9598-44ff-a878-03abe2533c29", "policecalls2022-q3.csv"),
-    "2022_Q4": ("66c80471-5c3d-4df3-89b6-ca1f6a97003a", "policecalls2022-q4.csv"),
     "2023_Q1": ("c7c8c01e-5230-42ac-a0fb-d1c9d6427f9c", "policecalls2023-q1.csv"),
     "2023_Q2": ("2b0b8ebe-89f4-44ef-9e87-904ae362d9ec", "policecalls2023-q2.csv"),
-    "2023_Q3": ("170277bb-a667-4ce5-8428-6a676450a1ea", "policecalls2023-q3.csv"),
 }
 
 SR311_BASE = "https://data.sanjoseca.gov/dataset/5bd6605f-43fc-4ccc-b80b-3c15b5a02319/resource/{rid}/download/{fname}"
 SR311_URLS = {
-    2017: ("6399d341-880c-49eb-8cb6-5fb294bf48dc", "311-service-requests-2017.csv"),
-    2018: ("d4746f5f-fe13-440b-8488-0d72ca8662c7", "311-service-requests-2018.csv"),
     2019: ("c5c5034a-b238-440c-84b5-5654799ca159", "311-service-requests-2019.csv"),
-    2020: ("850c5060-ccf6-4515-82d6-c582dcd8e546", "311-service-requests-2020.csv"),
     2021: ("4b0563f3-ed85-4889-8c39-05f160dbe0eb", "311-service-requests-2021.csv"),
-    2022: ("0f26e09e-9e1f-4305-9d2d-fb5d8292ae8a", "311-service-requests-2022.csv"),
     2023: ("00b1c1ba-b83e-40a0-8260-e634c57e4fcc", "311-service-requests-2023.csv"),
     2024: ("ac55d3cd-b4fe-4f96-bf12-4ce3191c8bd4", "311-service-requests-2024.csv"),
-    2025: ("761d15cc-0e89-46f4-a35b-0e586d746edf", "311-service-requests-2025.csv"),
 }
 
 
-def _fetch_csv(url, timeout=60):
+def _fetch_csv(url, timeout=45):
     """Download a CSV via requests (follows redirects to S3) and return a DataFrame."""
     headers = {"User-Agent": "Mozilla/5.0 (SJ-Dashboard) Streamlit/1.0"}
     resp = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
     resp.raise_for_status()
-    # Handle BOM and encoding
     content = resp.content.decode("utf-8-sig", errors="replace")
     return pd.read_csv(StringIO(content), low_memory=False)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_fire_data():
-    """Load and combine all fire incident CSVs from the open data portal."""
-    frames = []
-    errors = []
-    for year, url in FIRE_URLS.items():
-        try:
-            df = _fetch_csv(url)
-            df["_year"] = year
-            frames.append(df)
-        except Exception as e:
-            errors.append(f"Fire {year}: {e}")
-    if not frames:
-        return pd.DataFrame()
-    combined = pd.concat(frames, ignore_index=True)
+def _download_one(label, year_or_key, url):
+    """Worker for parallel downloading. Returns (label, year_or_key, df_or_None)."""
+    try:
+        df = _fetch_csv(url)
+        return (label, year_or_key, df)
+    except Exception:
+        return (label, year_or_key, None)
 
-    # Normalize column names (some years may differ slightly)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_all_data():
+    """Download all datasets in PARALLEL and return (fire_df, police_df, sr311_df)."""
+    tasks = []
+
+    # Build task list
+    for year, url in FIRE_URLS.items():
+        tasks.append(("fire", year, url))
+    for key, (rid, fname) in POLICE_QUARTERLY.items():
+        url = POLICE_QUARTERLY_BASE.format(rid=rid, fname=fname)
+        tasks.append(("police", key, url))
+    for year, (rid, fname) in SR311_URLS.items():
+        url = SR311_BASE.format(rid=rid, fname=fname)
+        tasks.append(("311", year, url))
+
+    # Download all in parallel (up to 8 concurrent)
+    results = {"fire": [], "police": [], "311": []}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {
+            pool.submit(_download_one, label, key, url): (label, key)
+            for label, key, url in tasks
+        }
+        for future in as_completed(futures):
+            label, key, df = future.result()
+            if df is not None:
+                if label == "fire":
+                    df["_year"] = key
+                elif label == "police":
+                    year_q = str(key).split("_")
+                    df["_year"] = int(year_q[0])
+                    df["_quarter"] = year_q[1]
+                elif label == "311":
+                    df["_year"] = key
+                results[label].append(df)
+
+    fire_df = pd.concat(results["fire"], ignore_index=True) if results["fire"] else pd.DataFrame()
+    police_df = pd.concat(results["police"], ignore_index=True) if results["police"] else pd.DataFrame()
+    sr311_df = pd.concat(results["311"], ignore_index=True) if results["311"] else pd.DataFrame()
+
+    return fire_df, police_df, sr311_df
+
+
+def process_fire(combined):
+    """Normalize columns, parse dates, compute response times."""
+    if combined.empty:
+        return combined
     col_map = {}
     for c in combined.columns:
         cl = c.strip().lower().replace(" ", "_")
@@ -367,137 +391,65 @@ def load_fire_data():
         elif "battalion" in cl:
             col_map[c] = "battalion"
     combined.rename(columns=col_map, inplace=True)
-
-    # Parse event datetime
     if "event_datetime" in combined.columns:
         combined["event_datetime"] = pd.to_datetime(combined["event_datetime"], errors="coerce")
     if "dispatched_time" in combined.columns:
         combined["dispatched_time"] = pd.to_datetime(combined["dispatched_time"], errors="coerce")
     if "onscene_time" in combined.columns:
         combined["onscene_time"] = pd.to_datetime(combined["onscene_time"], errors="coerce")
-
-    # Compute response time in minutes (event → onscene)
     if "event_datetime" in combined.columns and "onscene_time" in combined.columns:
-        combined["response_min"] = (
-            combined["onscene_time"] - combined["event_datetime"]
-        ).dt.total_seconds() / 60.0
-        # Filter out invalid values
-        combined.loc[
-            (combined["response_min"] < 0) | (combined["response_min"] > 60),
-            "response_min",
-        ] = np.nan
-
+        combined["response_min"] = (combined["onscene_time"] - combined["event_datetime"]).dt.total_seconds() / 60.0
+        combined.loc[(combined["response_min"] < 0) | (combined["response_min"] > 60), "response_min"] = np.nan
     return combined
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_police_data():
-    """Load police calls for service quarterly CSVs."""
-    frames = []
-    errors = []
-    for key, (rid, fname) in POLICE_QUARTERLY.items():
-        url = POLICE_QUARTERLY_BASE.format(rid=rid, fname=fname)
-        try:
-            df = _fetch_csv(url)
-            year_q = key.split("_")
-            df["_year"] = int(year_q[0])
-            df["_quarter"] = year_q[1]
-            frames.append(df)
-        except Exception as e:
-            errors.append(f"Police {key}: {e}")
-    if not frames:
-        return pd.DataFrame()
-    combined = pd.concat(frames, ignore_index=True)
-
-    # Normalize key columns
+def process_police(combined):
+    """Normalize police call columns."""
+    if combined.empty:
+        return combined
     col_map = {}
     for c in combined.columns:
         cl = c.strip().upper()
-        if cl == "CALL_TYPE":
-            col_map[c] = "call_type"
-        elif cl == "FINAL_DISPO" or cl == "FINAL_DISPOSITION":
-            col_map[c] = "disposition"
-        elif cl == "FINAL_DISPO_CODE":
-            col_map[c] = "dispo_code"
-        elif cl == "PRIORITY":
-            col_map[c] = "priority"
-        elif cl == "OFFENSE_DATE" or cl == "REPORT_DATE":
-            if "offense" in c.lower():
-                col_map[c] = "offense_date"
-            else:
-                col_map[c] = "report_date"
-        elif cl == "ADDRESS":
-            col_map[c] = "address"
-        elif cl == "CALLTYPE_CODE":
-            col_map[c] = "calltype_code"
-        elif cl == "OFFENSE_TIME":
-            col_map[c] = "offense_time"
+        if cl == "CALL_TYPE": col_map[c] = "call_type"
+        elif cl in ("FINAL_DISPO", "FINAL_DISPOSITION"): col_map[c] = "disposition"
+        elif cl == "FINAL_DISPO_CODE": col_map[c] = "dispo_code"
+        elif cl == "PRIORITY": col_map[c] = "priority"
+        elif cl == "OFFENSE_DATE": col_map[c] = "offense_date"
+        elif cl == "REPORT_DATE": col_map[c] = "report_date"
+        elif cl == "ADDRESS": col_map[c] = "address"
+        elif cl == "CALLTYPE_CODE": col_map[c] = "calltype_code"
+        elif cl == "OFFENSE_TIME": col_map[c] = "offense_time"
     combined.rename(columns=col_map, inplace=True)
-
     if "offense_date" in combined.columns:
         combined["offense_date"] = pd.to_datetime(combined["offense_date"], errors="coerce")
-
     return combined
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_311_data():
-    """Load 311 service request CSVs."""
-    frames = []
-    errors = []
-    for year, (rid, fname) in SR311_URLS.items():
-        url = SR311_BASE.format(rid=rid, fname=fname)
-        try:
-            df = _fetch_csv(url)
-            df["_year"] = year
-            frames.append(df)
-        except Exception as e:
-            errors.append(f"311 {year}: {e}")
-    if not frames:
-        return pd.DataFrame()
-    combined = pd.concat(frames, ignore_index=True)
-
-    # Normalize columns
+def process_311(combined):
+    """Normalize 311 columns, compute resolution time."""
+    if combined.empty:
+        return combined
     col_map = {}
     for c in combined.columns:
         cl = c.strip().lower().replace(" ", "_")
-        if "incident_id" in cl or "case_id" in cl:
-            col_map[c] = "case_id"
-        elif "status" in cl:
-            col_map[c] = "status"
-        elif "source" in cl:
-            col_map[c] = "source"
-        elif "category" in cl:
-            col_map[c] = "category"
-        elif "service" in cl and "type" in cl:
-            col_map[c] = "service_type"
-        elif "latitude" in cl:
-            col_map[c] = "latitude"
-        elif "longitude" in cl:
-            col_map[c] = "longitude"
-        elif "date_created" in cl or "created" in cl:
-            col_map[c] = "created_date"
-        elif "date_last_updated" in cl or "updated" in cl:
-            col_map[c] = "updated_date"
-        elif "department" in cl:
-            col_map[c] = "department"
+        if "incident_id" in cl or "case_id" in cl: col_map[c] = "case_id"
+        elif "status" in cl: col_map[c] = "status"
+        elif "source" in cl: col_map[c] = "source"
+        elif "category" in cl: col_map[c] = "category"
+        elif "service" in cl and "type" in cl: col_map[c] = "service_type"
+        elif "latitude" in cl: col_map[c] = "latitude"
+        elif "longitude" in cl: col_map[c] = "longitude"
+        elif "date_created" in cl or "created" in cl: col_map[c] = "created_date"
+        elif "date_last_updated" in cl or "updated" in cl: col_map[c] = "updated_date"
+        elif "department" in cl: col_map[c] = "department"
     combined.rename(columns=col_map, inplace=True)
-
     if "created_date" in combined.columns:
         combined["created_date"] = pd.to_datetime(combined["created_date"], errors="coerce")
     if "updated_date" in combined.columns:
         combined["updated_date"] = pd.to_datetime(combined["updated_date"], errors="coerce")
-
-    # Compute resolution days
     if "created_date" in combined.columns and "updated_date" in combined.columns:
-        combined["resolution_days"] = (
-            combined["updated_date"] - combined["created_date"]
-        ).dt.total_seconds() / 86400.0
-        combined.loc[
-            (combined["resolution_days"] < 0) | (combined["resolution_days"] > 365),
-            "resolution_days",
-        ] = np.nan
-
+        combined["resolution_days"] = (combined["updated_date"] - combined["created_date"]).dt.total_seconds() / 86400.0
+        combined.loc[(combined["resolution_days"] < 0) | (combined["resolution_days"] > 365), "resolution_days"] = np.nan
     return combined
 
 
@@ -743,10 +695,14 @@ def apply_chart_style(fig, height=320):
 # LOAD ALL DATA
 # ============================================================
 
-with st.spinner("🔄 Fetching live data from data.sanjoseca.gov — this may take 30-60 seconds on first load …"):
-    fire_df = load_fire_data()
-    police_df = load_police_data()
-    sr311_df = load_311_data()
+# ============================================================
+# LOAD ALL DATA (parallel, cached)
+# ============================================================
+
+fire_raw, police_raw, sr311_raw = load_all_data()
+fire_df = process_fire(fire_raw)
+police_df = process_police(police_raw)
+sr311_df = process_311(sr311_raw)
 
 fire_ok = len(fire_df) > 0
 police_ok = len(police_df) > 0
