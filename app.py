@@ -266,6 +266,58 @@ st.markdown("""
         color: #64748b;
         margin-bottom: 20px;
     }
+
+    /* Filter bar */
+    .filter-bar {
+        background: linear-gradient(135deg, #111827 0%, #0f172a 100%);
+        border: 1px solid #1e293b;
+        border-radius: 10px;
+        padding: 14px 20px;
+        margin-bottom: 12px;
+    }
+    .filter-label {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11px;
+        color: #94a3b8;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        margin-bottom: 4px;
+    }
+
+    /* AI query tab */
+    .ai-input-area {
+        background: #111827;
+        border: 1px solid #1e293b;
+        border-radius: 12px;
+        padding: 20px;
+        margin-bottom: 16px;
+    }
+    .ai-response-area {
+        background: linear-gradient(135deg, #0f172a 0%, #111827 100%);
+        border: 1px solid #1e293b;
+        border-radius: 12px;
+        padding: 20px;
+        min-height: 200px;
+    }
+
+    /* Dataset links */
+    .dataset-links {
+        background: #111827;
+        border: 1px solid #1e293b;
+        border-radius: 10px;
+        padding: 20px 24px;
+        margin-top: 24px;
+    }
+    .dataset-links a {
+        color: #f59e0b;
+        text-decoration: none;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12px;
+    }
+    .dataset-links a:hover {
+        text-decoration: underline;
+        color: #fbbf24;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -692,30 +744,19 @@ def apply_chart_style(fig, height=320):
 
 
 # ============================================================
-# LOAD ALL DATA
-# ============================================================
-
-# ============================================================
 # LOAD ALL DATA (parallel, cached)
 # ============================================================
 
 fire_raw, police_raw, sr311_raw = load_all_data()
-fire_df = process_fire(fire_raw)
-police_df = process_police(police_raw)
-sr311_df = process_311(sr311_raw)
+fire_df_full = process_fire(fire_raw)
+police_df_full = process_police(police_raw)
+sr311_df_full = process_311(sr311_raw)
 
-fire_ok = len(fire_df) > 0
-police_ok = len(police_df) > 0
-sr311_ok = len(sr311_df) > 0
+fire_ok_full = len(fire_df_full) > 0
+police_ok_full = len(police_df_full) > 0
+sr311_ok_full = len(sr311_df_full) > 0
 
-if fire_ok:
-    fire_stats = compute_fire_analysis(fire_df)
-if police_ok:
-    police_stats = compute_police_analysis(police_df)
-if sr311_ok:
-    sr311_stats = compute_311_analysis(sr311_df)
-
-total_records = (len(fire_df) if fire_ok else 0) + (len(police_df) if police_ok else 0) + (len(sr311_df) if sr311_ok else 0)
+total_records = (len(fire_df_full) if fire_ok_full else 0) + (len(police_df_full) if police_ok_full else 0) + (len(sr311_df_full) if sr311_ok_full else 0)
 
 
 # ============================================================
@@ -736,11 +777,114 @@ st.markdown(f"""
 
 
 # ============================================================
+# GLOBAL FILTERS
+# ============================================================
+
+st.markdown('<div class="filter-label" style="margin-top:8px;">⚙️ GLOBAL FILTERS — dynamically updates all charts</div>', unsafe_allow_html=True)
+
+fcol1, fcol2, fcol3, fcol4 = st.columns([2, 2, 3, 2])
+
+# Collect available years
+all_fire_years = sorted(fire_df_full["_year"].dropna().unique().tolist()) if fire_ok_full else []
+all_police_years = sorted(police_df_full["_year"].dropna().unique().tolist()) if police_ok_full else []
+all_311_years = sorted(sr311_df_full["_year"].dropna().unique().tolist()) if sr311_ok_full else []
+all_years = sorted(set(all_fire_years + all_police_years + all_311_years))
+
+with fcol1:
+    if all_years and len(all_years) > 1:
+        year_range = st.select_slider(
+            "Year Range",
+            options=all_years,
+            value=(min(all_years), max(all_years)),
+            key="year_filter",
+        )
+    else:
+        year_range = (min(all_years), max(all_years)) if all_years else (2018, 2024)
+
+with fcol2:
+    # Fire incident type filter
+    fire_types_available = sorted(fire_df_full["incident_type"].dropna().unique().tolist()) if fire_ok_full and "incident_type" in fire_df_full.columns else []
+    selected_fire_types = st.multiselect(
+        "Fire Incident Type",
+        options=fire_types_available,
+        default=fire_types_available,
+        key="fire_type_filter",
+    ) if fire_types_available else fire_types_available
+
+with fcol3:
+    # Police call type filter (top categories only for usability)
+    if police_ok_full and "call_type" in police_df_full.columns:
+        top_call_types = police_df_full["call_type"].value_counts().head(20).index.tolist()
+        selected_call_types = st.multiselect(
+            "Police Call Type (top 20)",
+            options=top_call_types,
+            default=top_call_types,
+            key="police_type_filter",
+        )
+    else:
+        selected_call_types = []
+
+with fcol4:
+    # 311 category filter
+    if sr311_ok_full:
+        cat_col = "service_type" if "service_type" in sr311_df_full.columns else "category" if "category" in sr311_df_full.columns else None
+        if cat_col:
+            top_311_cats = sr311_df_full[cat_col].value_counts().head(15).index.tolist()
+            selected_311_cats = st.multiselect(
+                "311 Service Type (top 15)",
+                options=top_311_cats,
+                default=top_311_cats,
+                key="sr311_type_filter",
+            )
+        else:
+            cat_col = None
+            selected_311_cats = []
+    else:
+        cat_col = None
+        selected_311_cats = []
+
+
+# ============================================================
+# APPLY FILTERS
+# ============================================================
+
+# Year filter
+y_min, y_max = year_range
+
+fire_df = fire_df_full[(fire_df_full["_year"] >= y_min) & (fire_df_full["_year"] <= y_max)].copy() if fire_ok_full else pd.DataFrame()
+police_df = police_df_full[(police_df_full["_year"] >= y_min) & (police_df_full["_year"] <= y_max)].copy() if police_ok_full else pd.DataFrame()
+sr311_df = sr311_df_full[(sr311_df_full["_year"] >= y_min) & (sr311_df_full["_year"] <= y_max)].copy() if sr311_ok_full else pd.DataFrame()
+
+# Type filters
+if fire_ok_full and selected_fire_types and "incident_type" in fire_df.columns:
+    fire_df = fire_df[fire_df["incident_type"].isin(selected_fire_types)]
+if police_ok_full and selected_call_types and "call_type" in police_df.columns:
+    police_df = police_df[police_df["call_type"].isin(selected_call_types)]
+if sr311_ok_full and selected_311_cats and cat_col and cat_col in sr311_df.columns:
+    sr311_df = sr311_df[sr311_df[cat_col].isin(selected_311_cats)]
+
+fire_ok = len(fire_df) > 0
+police_ok = len(police_df) > 0
+sr311_ok = len(sr311_df) > 0
+
+if fire_ok:
+    fire_stats = compute_fire_analysis(fire_df)
+if police_ok:
+    police_stats = compute_police_analysis(police_df)
+if sr311_ok:
+    sr311_stats = compute_311_analysis(sr311_df)
+
+filtered_total = len(fire_df) + len(police_df) + len(sr311_df)
+if filtered_total < total_records:
+    st.caption(f"🔍 Showing **{filtered_total:,}** of {total_records:,} records based on active filters")
+
+
+# ============================================================
 # TABS
 # ============================================================
 
-tab_overview, tab_fire, tab_police, tab_311, tab_cross = st.tabs(
-    ["Executive Summary", "Fire Response", "Police Calls", "311 Services", "Cross-System"]
+tab_overview, tab_fire, tab_police, tab_311, tab_cross, tab_ai = st.tabs(
+    ["Executive Summary", "Fire Response", "Police Calls", "311 Services", "Cross-System", "🤖 AI Query"]
 )
 
 
@@ -1181,12 +1325,197 @@ with tab_cross:
     insight_box("Areas with overlapping high demand across fire, police, AND 311 represent 'chronic demand zones' where residents simultaneously experience emergencies and infrastructure decay. These zones need coordinated multi-department intervention, not siloed responses.", "finding")
 
 
+# ======================== AI QUERY TAB ========================
+with tab_ai:
+    st.markdown('<div class="section-title">🤖 AI-Powered Data Query</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-subtitle">Ask questions in plain English — powered by Gemini 2.5 Flash</div>', unsafe_allow_html=True)
+
+    # API key handling
+    gemini_key = st.text_input(
+        "Gemini API Key",
+        type="password",
+        placeholder="AIzaSyA6qngNPg_4xtkS5yWyK0-kLcPLyYAvVZI",
+        help="Get a free key at https://aistudio.google.com/apikey",
+        key="gemini_api_key",
+    )
+
+    # Build dataset schema summary for the AI prompt
+    def _build_schema_context():
+        parts = []
+        if fire_ok:
+            parts.append(f"**fire_df** ({len(fire_df):,} rows) — San José Fire Incidents\n  Columns: {', '.join(fire_df.columns.tolist())}\n  Years: {sorted(fire_df['_year'].unique().tolist())}")
+            if "incident_type" in fire_df.columns:
+                parts.append(f"  incident_type values: {fire_df['incident_type'].value_counts().head(5).index.tolist()}")
+            if "battalion" in fire_df.columns:
+                parts.append(f"  battalion values: {sorted(fire_df['battalion'].dropna().unique().tolist())}")
+        if police_ok:
+            parts.append(f"\n**police_df** ({len(police_df):,} rows) — Police Calls for Service\n  Columns: {', '.join(police_df.columns.tolist())}\n  Years: {sorted(police_df['_year'].unique().tolist())}")
+            if "call_type" in police_df.columns:
+                parts.append(f"  call_type values (top 10): {police_df['call_type'].value_counts().head(10).index.tolist()}")
+            if "disposition" in police_df.columns:
+                parts.append(f"  disposition values: {police_df['disposition'].value_counts().head(8).index.tolist()}")
+        if sr311_ok:
+            sr_cat_col = "service_type" if "service_type" in sr311_df.columns else "category" if "category" in sr311_df.columns else None
+            parts.append(f"\n**sr311_df** ({len(sr311_df):,} rows) — 311 Service Requests\n  Columns: {', '.join(sr311_df.columns.tolist())}\n  Years: {sorted(sr311_df['_year'].unique().tolist())}")
+            if sr_cat_col:
+                parts.append(f"  {sr_cat_col} values (top 10): {sr311_df[sr_cat_col].value_counts().head(10).index.tolist()}")
+            if "department" in sr311_df.columns:
+                parts.append(f"  department values: {sr311_df['department'].value_counts().head(8).index.tolist()}")
+        return "\n".join(parts)
+
+    # Example queries
+    st.markdown("""
+    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px;">
+        <span style="background:#1e293b; border:1px solid #334155; border-radius:16px; padding:6px 14px; font-family:'JetBrains Mono',monospace; font-size:11px; color:#94a3b8;">
+            💡 "What are the top 5 fire stations with the slowest response times?"
+        </span>
+        <span style="background:#1e293b; border:1px solid #334155; border-radius:16px; padding:6px 14px; font-family:'JetBrains Mono',monospace; font-size:11px; color:#94a3b8;">
+            💡 "Show police call types by year as a bar chart"
+        </span>
+        <span style="background:#1e293b; border:1px solid #334155; border-radius:16px; padding:6px 14px; font-family:'JetBrains Mono',monospace; font-size:11px; color:#94a3b8;">
+            💡 "Which 311 categories take the longest to resolve?"
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    user_query = st.text_area(
+        "Ask a question about San José public safety data:",
+        placeholder="e.g. 'Show me the trend of medical vs fire incidents by year' or 'What percentage of police calls are canceled?'",
+        height=80,
+        key="ai_query_input",
+    )
+
+    run_query = st.button("🔍 Run Query", type="primary", use_container_width=True)
+
+    if run_query and user_query:
+        if not gemini_key:
+            st.error("⚠️ Please enter your Gemini API key above. Get one free at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)")
+        else:
+            schema_ctx = _build_schema_context()
+
+            system_prompt = f"""You are a data analyst assistant for the City of San José, California.
+You have access to three pandas DataFrames already loaded in memory:
+- `fire_df`: Fire incident data
+- `police_df`: Police calls for service data
+- `sr311_df`: 311 service request data
+
+Here are the schemas and sample values:
+{schema_ctx}
+
+The user will ask a question in plain English. You must respond with ONLY valid Python code that:
+1. Uses the existing `fire_df`, `police_df`, and/or `sr311_df` DataFrames (already loaded — do NOT read any files)
+2. Creates either a Plotly figure assigned to a variable called `fig`, or a pandas DataFrame assigned to `result_df`, or both
+3. For charts, use plotly.express or plotly.graph_objects. Use dark theme: template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
+4. Do NOT use st.write, st.plotly_chart, print, or display. Just assign to `fig` and/or `result_df`
+5. Do NOT import pandas or plotly — they are already imported as pd, px, go
+6. Handle missing data with .dropna() where appropriate
+7. If the query is about response times, use the 'response_min' column in fire_df
+8. If the query cannot be answered from the data, set result_df = pd.DataFrame({{'Note': ['The requested data is not available in the current datasets.']}})
+
+Respond with ONLY the Python code. No markdown fences, no explanations, no comments."""
+
+            with st.spinner("🤖 Gemini is analyzing your query…"):
+                try:
+                    api_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+                    payload = {
+                        "contents": [
+                            {"role": "user", "parts": [{"text": system_prompt + "\n\nUser question: " + user_query}]}
+                        ],
+                        "generationConfig": {
+                            "temperature": 0.1,
+                            "maxOutputTokens": 2048,
+                        }
+                    }
+                    resp = requests.post(
+                        f"{api_url}?key={gemini_key}",
+                        json=payload,
+                        headers={"Content-Type": "application/json"},
+                        timeout=30,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                    # Extract generated text
+                    generated_text = data["candidates"][0]["content"]["parts"][0]["text"]
+
+                    # Clean code fences if present
+                    code = generated_text.strip()
+                    if code.startswith("```"):
+                        code = "\n".join(code.split("\n")[1:])
+                    if code.endswith("```"):
+                        code = code.rsplit("```", 1)[0]
+                    code = code.strip()
+
+                    # Show the generated code in an expander
+                    with st.expander("📝 Generated Code", expanded=False):
+                        st.code(code, language="python")
+
+                    # Execute the code
+                    exec_globals = {
+                        "pd": pd, "np": np, "px": px, "go": go,
+                        "make_subplots": make_subplots,
+                        "fire_df": fire_df, "police_df": police_df, "sr311_df": sr311_df,
+                        "COLORS": COLORS,
+                    }
+                    exec_locals = {}
+                    exec(code, exec_globals, exec_locals)
+
+                    # Display results
+                    has_output = False
+                    if "fig" in exec_locals and exec_locals["fig"] is not None:
+                        st.plotly_chart(exec_locals["fig"], use_container_width=True, config={"displayModeBar": False})
+                        has_output = True
+
+                    if "result_df" in exec_locals and exec_locals["result_df"] is not None:
+                        rdf = exec_locals["result_df"]
+                        if isinstance(rdf, pd.DataFrame) and not rdf.empty:
+                            st.dataframe(rdf, use_container_width=True, height=min(400, 40 + len(rdf) * 35))
+                            has_output = True
+
+                    if not has_output:
+                        st.info("The query executed successfully but produced no chart or table. Try rephrasing your question.")
+
+                except requests.exceptions.HTTPError as e:
+                    if "400" in str(e) or "403" in str(e):
+                        st.error("⚠️ Invalid API key or Gemini API error. Please check your key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey)")
+                    else:
+                        st.error(f"⚠️ Gemini API error: {e}")
+                except Exception as e:
+                    st.error(f"⚠️ Error executing query: {e}")
+
+    elif run_query and not user_query:
+        st.warning("Please enter a question first.")
+
+
 # ============================================================
-# FOOTER
+# DATASET LINKS + FOOTER
 # ============================================================
-st.markdown(f"""
-<div style="padding:16px 0; border-top:1px solid {COLORS['card_border']}; margin-top:32px; display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:11px; color:{COLORS['text_muted']};">
-    <span>Data: San José Open Data Portal (data.sanjoseca.gov) — CC0 / CC-BY Licensed</span>
-    <span>Live data · Dashboard built with Streamlit + Plotly</span>
+
+st.markdown("""
+<div class="dataset-links">
+    <div style="font-family:'Inter',sans-serif; font-size:15px; font-weight:600; color:#f1f5f9; margin-bottom:12px;">
+        📂 Source Datasets — San José Open Data Portal
+    </div>
+    <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px;">
+        <div>
+            <div style="font-family:'JetBrains Mono',monospace; font-size:10px; color:#64748b; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">🔥 Fire Incidents</div>
+            <a href="https://data.sanjoseca.gov/dataset/san-jose-fire-incidents" target="_blank">data.sanjoseca.gov/dataset/san-jose-fire-incidents</a>
+            <div style="font-size:11px; color:#475569; margin-top:4px;">2015–2024 · CSV/XLSX · Fire Dept</div>
+        </div>
+        <div>
+            <div style="font-family:'JetBrains Mono',monospace; font-size:10px; color:#64748b; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">🚔 Police Calls for Service</div>
+            <a href="https://data.sanjoseca.gov/dataset/police-calls-for-service-quarterly" target="_blank">data.sanjoseca.gov/.../police-calls-for-service-quarterly</a>
+            <div style="font-size:11px; color:#475569; margin-top:4px;">2021–2023 Quarterly · CSV · Police Dept</div>
+        </div>
+        <div>
+            <div style="font-family:'JetBrains Mono',monospace; font-size:10px; color:#64748b; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">📞 311 Service Requests</div>
+            <a href="https://data.sanjoseca.gov/dataset/311-service-request-data" target="_blank">data.sanjoseca.gov/dataset/311-service-request-data</a>
+            <div style="font-size:11px; color:#475569; margin-top:4px;">2017–2025 · CSV · Info Technology</div>
+        </div>
+    </div>
+    <div style="margin-top:14px; padding-top:12px; border-top:1px solid #1e293b; display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:11px; color:#64748b;">
+        <span>All data: CC0 / CC-BY Licensed · <a href="https://data.sanjoseca.gov/dataset" target="_blank">Browse all 170 datasets →</a></span>
+        <span>Dashboard built with Streamlit + Plotly · Live data from data.sanjoseca.gov</span>
+    </div>
 </div>
 """, unsafe_allow_html=True)
