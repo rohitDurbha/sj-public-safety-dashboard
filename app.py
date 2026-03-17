@@ -5,6 +5,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
 from datetime import datetime
+import requests
+from io import StringIO, BytesIO
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -314,24 +316,42 @@ SR311_URLS = {
 }
 
 
+def _fetch_csv(url, timeout=60):
+    """Download a CSV via requests (follows redirects to S3) and return a DataFrame."""
+    headers = {"User-Agent": "Mozilla/5.0 (SJ-Dashboard) Streamlit/1.0"}
+    resp = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+    resp.raise_for_status()
+    # Handle BOM and encoding
+    content = resp.content.decode("utf-8-sig", errors="replace")
+    return pd.read_csv(StringIO(content), low_memory=False)
+
+
+def _fetch_excel(url, timeout=90):
+    """Download an XLSX via requests and return a DataFrame."""
+    headers = {"User-Agent": "Mozilla/5.0 (SJ-Dashboard) Streamlit/1.0"}
+    resp = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+    resp.raise_for_status()
+    return pd.read_excel(BytesIO(resp.content), engine="openpyxl")
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_fire_data():
     """Load and combine all fire incident CSVs from the open data portal."""
     frames = []
     for year, url in FIRE_URLS.items():
         try:
-            df = pd.read_csv(url, low_memory=False)
+            df = _fetch_csv(url)
             df["_year"] = year
             frames.append(df)
-        except Exception:
-            pass
+        except Exception as e:
+            st.toast(f"⚠️ Fire {year}: {e}", icon="⚠️")
     # 2023 XLSX
     try:
-        df23 = pd.read_excel(FIRE_2023_URL, engine="openpyxl")
+        df23 = _fetch_excel(FIRE_2023_URL)
         df23["_year"] = 2023
         frames.append(df23)
-    except Exception:
-        pass
+    except Exception as e:
+        st.toast(f"⚠️ Fire 2023 XLSX: {e}", icon="⚠️")
     if not frames:
         return pd.DataFrame()
     combined = pd.concat(frames, ignore_index=True)
@@ -393,13 +413,13 @@ def load_police_data():
     for key, (rid, fname) in POLICE_QUARTERLY.items():
         url = POLICE_QUARTERLY_BASE.format(rid=rid, fname=fname)
         try:
-            df = pd.read_csv(url, low_memory=False)
+            df = _fetch_csv(url)
             year_q = key.split("_")
             df["_year"] = int(year_q[0])
             df["_quarter"] = year_q[1]
             frames.append(df)
-        except Exception:
-            pass
+        except Exception as e:
+            st.toast(f"⚠️ Police {key}: {e}", icon="⚠️")
     if not frames:
         return pd.DataFrame()
     combined = pd.concat(frames, ignore_index=True)
@@ -442,11 +462,11 @@ def load_311_data():
     for year, (rid, fname) in SR311_URLS.items():
         url = SR311_BASE.format(rid=rid, fname=fname)
         try:
-            df = pd.read_csv(url, low_memory=False)
+            df = _fetch_csv(url)
             df["_year"] = year
             frames.append(df)
-        except Exception:
-            pass
+        except Exception as e:
+            st.toast(f"⚠️ 311 {year}: {e}", icon="⚠️")
     if not frames:
         return pd.DataFrame()
     combined = pd.concat(frames, ignore_index=True)
@@ -737,7 +757,7 @@ def apply_chart_style(fig, height=320):
 # LOAD ALL DATA
 # ============================================================
 
-with st.spinner("🔄 Loading live data from data.sanjoseca.gov …"):
+with st.spinner("🔄 Fetching live data from data.sanjoseca.gov — this may take 30-60 seconds on first load …"):
     fire_df = load_fire_data()
     police_df = load_police_data()
     sr311_df = load_311_data()
